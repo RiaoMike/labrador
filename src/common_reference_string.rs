@@ -58,6 +58,8 @@ pub struct CommonReferenceString<R: PolyRing> {
     /// Decomposition basis for inner product terms (g), roughly equal to `b1` and `b2`
     pub b2: u128,
     /// A reference to the CRS for the next recursive round, or `None` if this is the CRS for the last round
+    #[serde(skip)]
+    pub recursive_time: usize,
     pub next_crs: Option<Box<CommonReferenceString<R>>>,
 }
 
@@ -83,6 +85,8 @@ impl FoldedSize {
 }
 
 impl<R: PolyRing> CommonReferenceString<R> {
+    const MAX_RECURSION_DEPTH: usize = 7;
+
     pub fn floor_to_even(x: f64) -> u128 {
         let floor = x.floor() as u128;
         if floor % 2 == 0 {
@@ -131,23 +135,40 @@ impl<R: PolyRing> CommonReferenceString<R> {
     }
 
     pub fn new_for_size(size: Size) -> CommonReferenceString<R> {
-        let mut rng = rand::thread_rng();
-        Self::new(
-            size.num_witnesses,
-            size.witness_len,
-            size.norm_bound_sq,
-            size.num_constraints,
-            size.num_constant_constraints,
-            &mut rng,
-        )
+        Self::new_for_size_recurse(size, 0)
     }
 
     pub fn new<Rng: rand::Rng + ?Sized>(
         r: usize,
         n: usize,
+        beta_sq: f64,
+        num_constraints: usize,
+        num_constant_constraints: usize,
+        rng: &mut Rng,
+    ) -> CommonReferenceString<R> {
+        Self::new_recurse(r, n, beta_sq, num_constraints, num_constant_constraints, 0, rng)
+    }
+
+    pub fn new_for_size_recurse(size: Size, recurse: usize) -> CommonReferenceString<R> {
+        let mut rng = rand::thread_rng();
+        Self::new_recurse(
+            size.num_witnesses,
+            size.witness_len,
+            size.norm_bound_sq,
+            size.num_constraints,
+            size.num_constant_constraints,
+            recurse,
+            &mut rng,
+        )
+    }
+
+    fn new_recurse<Rng: rand::Rng + ?Sized>(
+        r: usize,
+        n: usize,
         mut beta_sq: f64,
         num_constraints: usize,
         num_constant_constraints: usize,
+        recurse: usize,
         rng: &mut Rng,
     ) -> CommonReferenceString<R> {
         let d = R::dimension();
@@ -158,11 +179,11 @@ impl<R: PolyRing> CommonReferenceString<R> {
         info!("Using Z_q[X]/(X^d+1) with q={q} ({} bits), d={d}", log2_q);
         info!("Setting CRS parameters for n={n}, r={r}, d={d}, beta={beta:.1}, num_constraints={num_constraints}, num_constant_constraints={num_constant_constraints}");
 
-        let MAX_RECURSION_DEPTH = 7;
-        beta_sq *= f64::sqrt(128. / 30.).powi(MAX_RECURSION_DEPTH);
+        beta_sq *= f64::sqrt(128. / 30.).powi(Self::MAX_RECURSION_DEPTH as i32);
         beta = beta_sq.sqrt();
         info!(
-            "  Accounting for at most {MAX_RECURSION_DEPTH} recursion levels, use beta={beta:.1}"
+            "  Accounting for at most {MAX_RECURSION_DEPTH} recursion levels, use beta={beta:.1}",
+            MAX_RECURSION_DEPTH = Self::MAX_RECURSION_DEPTH
         );
 
         // Checks
@@ -218,7 +239,8 @@ impl<R: PolyRing> CommonReferenceString<R> {
             norm: Norm::L2,
         };
         // let k = msis_1.upper_bound_h();
-        let k = msis::lattice_estimator::find_optimal_h_dynamic(&msis_1, norm_bound_1, 128).expect(format!("failed to find secure rank for {msis_1}. Are the witness vectors long enough in your system?").as_str());
+        // let k = msis::lattice_estimator::find_optimal_h_dynamic(&msis_1, norm_bound_1, 128).expect(format!("failed to find secure rank for {msis_1}. Are the witness vectors long enough in your system?").as_str());
+        let k = msis::lattice_estimator::find_optimal_h_dynamic(&msis_1, norm_bound_1, 128).unwrap_or(16);
         // let k = msis::find_optimal_h(&msis_1, 128).expect(format!("failed to find secure rank for {msis_1}. Are there enough constraints in your system?").as_str());
         // let k = msis_1.find_optimal_h_dynamic(norm_bound_1, SECPARAM).expect(format!("failed to find secure rank for {msis_1}. Are there enough constraints in your system?").as_str());
         msis_1 = msis_1.with_h(k).with_length_bound(norm_bound_1(k));
@@ -271,6 +293,7 @@ impl<R: PolyRing> CommonReferenceString<R> {
             b,
             b1,
             b2,
+            recursive_time: recurse,
             next_crs: None,
         };
         crs.next_crs = crs.next_crs().map(Box::new);
@@ -416,11 +439,11 @@ impl<R: PolyRing> CommonReferenceString<R> {
     }
 
     fn next_crs(&self) -> Option<CommonReferenceString<R>> {
-        if self.recurse() {
+        if self.recursive_time >= Self::MAX_RECURSION_DEPTH || !self.recurse() {
             return None;
         }
         let next_size = self.next_size();
 
-        Some(CommonReferenceString::<R>::new_for_size(next_size.size))
+        Some(Self::new_for_size_recurse(next_size.size, self.recursive_time+1))
     }
 }
